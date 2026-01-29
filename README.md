@@ -382,5 +382,8 @@ LarAI::registerProvider('custom', new MyProvider());
 
 ## License
 
-MIT
-# larai
+git Apache 2.0
+
+## Developer
+
+Aksel Aghajanyan (GitHub: `Aksel588`)
