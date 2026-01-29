@@ -3,6 +3,7 @@
 namespace AqwelAI\LarAI\Providers;
 
 use AqwelAI\LarAI\Contracts\Provider;
+use AqwelAI\LarAI\Contracts\StreamingProvider;
 use AqwelAI\LarAI\Exceptions\LarAIException;
 use AqwelAI\LarAI\Exceptions\UnsupportedFeatureException;
 use Illuminate\Support\Facades\App;
@@ -10,7 +11,7 @@ use Illuminate\Support\Facades\App;
 /**
  * LLaMA provider implementation (compatible with OpenAI-style APIs).
  */
-class LlamaProvider extends BaseProvider implements Provider
+class LlamaProvider extends BaseProvider implements Provider, StreamingProvider
 {
     /**
      * Return provider identifier.
@@ -43,6 +44,18 @@ class LlamaProvider extends BaseProvider implements Provider
             'temperature' => $options['temperature'] ?? 0.7,
         ];
 
+        if (isset($options['max_tokens'])) {
+            $payload['max_tokens'] = (int) $options['max_tokens'];
+        }
+
+        if (isset($options['tools'])) {
+            $payload['tools'] = $options['tools'];
+        }
+
+        if (isset($options['tool_choice'])) {
+            $payload['tool_choice'] = $options['tool_choice'];
+        }
+
         $response = $this->request()
             ->withToken($this->ensureApiKey())
             ->post($this->baseUrl() . '/chat/completions', $payload);
@@ -53,12 +66,84 @@ class LlamaProvider extends BaseProvider implements Provider
 
         $data = $response->json();
         $content = $data['choices'][0]['message']['content'] ?? '';
+        $toolCalls = $data['choices'][0]['message']['tool_calls'] ?? [];
 
         return [
             'content' => $content,
+            'tool_calls' => $toolCalls,
             'raw' => $data,
             'usage' => $this->extractUsage($data),
         ];
+    }
+
+    /**
+     * Stream a chat completion response.
+     *
+     * @return iterable<int, string>
+     */
+    public function streamChat(array $messages, array $options = []): iterable
+    {
+        $payload = [
+            'model' => $options['model'] ?? $this->config['model'] ?? null,
+            'messages' => $messages,
+            'temperature' => $options['temperature'] ?? 0.7,
+            'stream' => true,
+        ];
+
+        if (isset($options['max_tokens'])) {
+            $payload['max_tokens'] = (int) $options['max_tokens'];
+        }
+
+        if (isset($options['tools'])) {
+            $payload['tools'] = $options['tools'];
+        }
+
+        if (isset($options['tool_choice'])) {
+            $payload['tool_choice'] = $options['tool_choice'];
+        }
+
+        $response = $this->request()
+            ->withOptions(['stream' => true])
+            ->withToken($this->ensureApiKey())
+            ->post($this->baseUrl() . '/chat/completions', $payload);
+
+        if (!$response->successful()) {
+            throw new LarAIException('LLaMA streaming request failed: ' . $response->body());
+        }
+
+        return (function () use ($response) {
+            foreach ($this->streamSse($response) as $data) {
+                if ($data === '[DONE]') {
+                    break;
+                }
+
+                $payload = json_decode($data, true);
+
+                if (!is_array($payload)) {
+                    continue;
+                }
+
+                $chunk = $payload['choices'][0]['delta']['content'] ?? '';
+
+                if ($chunk !== '') {
+                    yield $chunk;
+                }
+            }
+        })();
+    }
+
+    /**
+     * Stream text via chat completions.
+     *
+     * @return iterable<int, string>
+     */
+    public function streamText(string $prompt, array $options = []): iterable
+    {
+        $messages = [
+            ['role' => 'user', 'content' => $prompt],
+        ];
+
+        return $this->streamChat($messages, $options);
     }
 
     /**

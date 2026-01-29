@@ -16,6 +16,32 @@ return [
         'queue' => env('LARAI_QUEUE_NAME', null),
     ],
 
+    'retry' => [
+        'enabled' => env('LARAI_RETRY', true),
+        'times' => env('LARAI_RETRY_TIMES', 3),
+        'sleep' => env('LARAI_RETRY_SLEEP', 200),
+        'max_sleep' => env('LARAI_RETRY_MAX_SLEEP', 2000),
+        'jitter' => env('LARAI_RETRY_JITTER', true),
+        'statuses' => [429, 500, 502, 503, 504],
+    ],
+
+    'cache' => [
+        'enabled' => env('LARAI_CACHE', false),
+        'ttl' => env('LARAI_CACHE_TTL', 300),
+        'store' => env('LARAI_CACHE_STORE', null),
+        'prefix' => env('LARAI_CACHE_PREFIX', 'larai:'),
+    ],
+
+    'usage' => [
+        'events' => env('LARAI_USAGE_EVENTS', true),
+        'include_response' => env('LARAI_USAGE_INCLUDE_RESPONSE', false),
+        'include_options' => env('LARAI_USAGE_INCLUDE_OPTIONS', false),
+    ],
+
+    'hooks' => [
+        'enabled' => env('LARAI_HOOKS', true),
+    ],
+
     'prompts' => [
         'summarize' => "Summarize the following text:\n\n{text}",
         'chat_system' => 'You are a helpful assistant.',

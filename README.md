@@ -7,11 +7,18 @@ LarAI is a Laravel-first AI toolkit built by Aqwel AI. It offers a clean facade,
 ## Features
 
 - Text generation and chat completions
+- Streaming chat/text responses
+- Tool/function calling (OpenAI-compatible providers)
 - Image generation from prompts
 - Summarization and prompt templates
 - Embeddings for semantic search
 - Queue/async support for heavy tasks
 - API usage logging
+- Automatic retry with backoff
+- Response caching for repeated calls
+- RAG helpers (chunking + vector store adapters)
+- Moderation hooks via events
+- File input helpers for summarize/embeddings
 - Provider-agnostic design
 
 ## Requirements
@@ -48,6 +55,10 @@ Common config options (`config/larai.php`):
 - `larai.timeout` request timeout in seconds
 - `larai.logging.enabled` enable usage logging
 - `larai.queue.enabled` enable queue support
+- `larai.retry.*` retry/backoff configuration
+- `larai.cache.*` response caching configuration
+- `larai.usage.*` usage event configuration
+- `larai.hooks.enabled` enable before/after request hooks
 - `larai.providers.*` per-provider API keys and defaults
 
 ## Quick Start
@@ -102,6 +113,55 @@ LarAI::chat([
 ]);
 ```
 
+### Tool Calling
+
+```php
+$tools = [
+    [
+        'type' => 'function',
+        'function' => [
+            'name' => 'get_weather',
+            'description' => 'Get the weather for a city',
+            'parameters' => [
+                'type' => 'object',
+                'properties' => [
+                    'city' => ['type' => 'string'],
+                ],
+                'required' => ['city'],
+            ],
+        ],
+    ],
+];
+
+$response = LarAI::chat([
+    ['role' => 'user', 'content' => 'What is the weather in Paris?'],
+], [
+    'tools' => $tools,
+    'tool_choice' => 'auto',
+]);
+
+$toolCalls = $response['tool_calls'] ?? [];
+```
+
+### Streaming Chat
+
+```php
+foreach (LarAI::streamChat([
+    ['role' => 'system', 'content' => 'You are a helpful assistant.'],
+    ['role' => 'user', 'content' => 'Write a short story.'],
+]) as $chunk) {
+    echo $chunk;
+}
+```
+
+You can also pass a callback:
+
+```php
+LarAI::streamText('Write a haiku.', [], function (string $chunk) {
+    echo $chunk;
+});
+```
+
 ### Image
 
 ```php
@@ -114,6 +174,12 @@ LarAI::image('A minimalist poster of a city skyline', [
 
 ```php
 LarAI::summarize($longText);
+```
+
+### File Summarization
+
+```php
+LarAI::summarizeFile(storage_path('docs/report.txt'));
 ```
 
 ### Embeddings
@@ -143,6 +209,7 @@ $prompt = LarAI::prompt('summarize', ['text' => $text]);
 All provider calls return a standardized array:
 
 - `content` for text/chat results
+- `tool_calls` for function/tool call outputs
 - `images` for image generations
 - `embeddings` for vector embeddings
 - `recommendations` for similarity-ranked items
@@ -158,6 +225,8 @@ You can pass options to any call:
 - `temperature` control creativity (chat/text)
 - `max_tokens` cap output length
 - `async` queue in the background when enabled
+- `cache` enable response caching
+- `cache_ttl` override cache TTL in seconds
 
 Example:
 
@@ -175,6 +244,8 @@ LarAI::text('Hello', [
 use AqwelAI\LarAI\Services\TextService;
 use AqwelAI\LarAI\Services\ImageService;
 use AqwelAI\LarAI\Services\EmbeddingsService;
+use AqwelAI\LarAI\Services\RagService;
+use AqwelAI\LarAI\VectorStores\InMemoryVectorStore;
 
 $textService = app(TextService::class);
 $result = $textService->generate('Write a tagline for a coffee shop.');
@@ -184,6 +255,11 @@ $image = $imageService->generate('A minimalist poster of a city skyline.');
 
 $embeddingsService = app(EmbeddingsService::class);
 $vectors = $embeddingsService->generate(['First sentence', 'Second sentence']);
+
+$ragService = app(RagService::class);
+$store = new InMemoryVectorStore();
+$ragService->index($longText, $store);
+$matches = $ragService->search('Explain the key points', $store);
 ```
 
 ## Queue and Async
@@ -220,6 +296,52 @@ LARAI_LOG_CHANNEL=stack
 ```
 
 When the provider returns usage data, LarAI logs provider and token usage.
+
+## Usage Events
+
+LarAI emits a `LarAIUsageReported` event when providers return usage data. You can listen
+to it to track costs or persist usage in your app.
+
+```php
+use AqwelAI\LarAI\Events\LarAIUsageReported;
+
+Event::listen(LarAIUsageReported::class, function (LarAIUsageReported $event) {
+    // Store $event->usage with $event->provider and $event->method
+});
+```
+
+## Moderation Hooks
+
+Use the before/after request events to block or inspect requests.
+
+```php
+use AqwelAI\LarAI\Events\LarAIBeforeRequest;
+
+Event::listen(LarAIBeforeRequest::class, function (LarAIBeforeRequest $event) {
+    if ($event->method === 'chat') {
+        // Return false to block the request
+        return false;
+    }
+});
+```
+
+## Caching
+
+Enable caching in `.env`:
+
+```
+LARAI_CACHE=true
+LARAI_CACHE_TTL=300
+```
+
+You can also enable cache per call:
+
+```php
+LarAI::text('Draft a product description.', [
+    'cache' => true,
+    'cache_ttl' => 600,
+]);
+```
 
 ## Providers
 

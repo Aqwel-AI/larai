@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\App;
 use Illuminate\Support\ServiceProvider;
 use AqwelAI\LarAI\Services\EmbeddingsService;
 use AqwelAI\LarAI\Services\ImageService;
+use AqwelAI\LarAI\Services\RagService;
 use AqwelAI\LarAI\Services\TextService;
 
 /**
@@ -34,6 +35,10 @@ class LarAIServiceProvider extends ServiceProvider
 
         $this->app->singleton(EmbeddingsService::class, function ($app) {
             return new EmbeddingsService($app->make(LarAI::class));
+        });
+
+        $this->app->singleton(RagService::class, function ($app) {
+            return new RagService($app->make(LarAI::class));
         });
     }
 

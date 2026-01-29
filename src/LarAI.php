@@ -4,9 +4,15 @@ namespace AqwelAI\LarAI;
 
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use AqwelAI\LarAI\Contracts\Provider;
+use AqwelAI\LarAI\Contracts\StreamingProvider;
+use AqwelAI\LarAI\Events\LarAIAfterRequest;
+use AqwelAI\LarAI\Events\LarAIBeforeRequest;
+use AqwelAI\LarAI\Events\LarAIUsageReported;
 use AqwelAI\LarAI\Exceptions\LarAIException;
 use AqwelAI\LarAI\Exceptions\UnsupportedFeatureException;
 use AqwelAI\LarAI\Jobs\LarAIJob;
@@ -78,6 +84,26 @@ class LarAI
     }
 
     /**
+     * Stream text chunks from a prompt.
+     *
+     * @return iterable<int, string>
+     */
+    public function streamText(string $prompt, array $options = [], ?callable $onChunk = null): iterable
+    {
+        return $this->streamProvider('streamText', [$prompt, $options], $options, $onChunk);
+    }
+
+    /**
+     * Stream chat chunks from role-based messages.
+     *
+     * @return iterable<int, string>
+     */
+    public function streamChat(array $messages, array $options = [], ?callable $onChunk = null): iterable
+    {
+        return $this->streamProvider('streamChat', [$messages, $options], $options, $onChunk);
+    }
+
+    /**
      * Generate images from a prompt.
      */
     public function image(string $prompt, array $options = []): array
@@ -94,11 +120,31 @@ class LarAI
     }
 
     /**
+     * Summarize the contents of a local file.
+     */
+    public function summarizeFile(string $path, array $options = []): array
+    {
+        $text = $this->extractTextFromFile($path);
+
+        return $this->summarize($text, $options);
+    }
+
+    /**
      * Generate embeddings for text or an array of texts.
      */
     public function embeddings(string|array $input, array $options = []): array
     {
         return $this->callProvider('embeddings', [$input, $options], $options);
+    }
+
+    /**
+     * Generate embeddings for the contents of a local file.
+     */
+    public function embeddingsFile(string $path, array $options = []): array
+    {
+        $text = $this->extractTextFromFile($path);
+
+        return $this->embeddings($text, $options);
     }
 
     /**
@@ -217,11 +263,54 @@ class LarAI
         }
 
         $provider = $this->provider(Arr::get($options, 'provider'));
+        $cacheEnabled = $this->cacheEnabled($options);
+
+        if ($cacheEnabled) {
+            $cache = $this->cacheStore();
+            $cacheKey = $this->cacheKey($provider->name(), $method, $args, $options);
+            $cached = $cache->get($cacheKey);
+
+            if (is_array($cached)) {
+                return $cached;
+            }
+        }
+
+        $this->dispatchBeforeRequest($provider->name(), $method, $args, $options);
         $response = $provider->{$method}(...$args);
 
-        $this->logUsage($provider->name(), $response);
+        if ($cacheEnabled) {
+            $cacheTtl = $this->cacheTtl($options);
+            $this->cacheStore()->put($cacheKey, $response, $cacheTtl);
+        }
+
+        $this->dispatchAfterRequest($provider->name(), $method, $args, $options, $response);
+        $this->recordUsage($provider->name(), $method, $options, $response);
 
         return $response;
+    }
+
+    /**
+     * Dispatch a streaming provider call.
+     *
+     * @return iterable<int, string>
+     */
+    protected function streamProvider(string $method, array $args, array $options = [], ?callable $onChunk = null): iterable
+    {
+        $provider = $this->provider(Arr::get($options, 'provider'));
+
+        if (!$provider instanceof StreamingProvider) {
+            throw new UnsupportedFeatureException('LarAI streaming is not supported by this provider.');
+        }
+
+        return (function () use ($provider, $method, $args, $onChunk) {
+            foreach ($provider->{$method}(...$args) as $chunk) {
+                if ($onChunk) {
+                    $onChunk($chunk);
+                }
+
+                yield $chunk;
+            }
+        })();
     }
 
     /**
@@ -251,15 +340,16 @@ class LarAI
     /**
      * Log usage metadata when provided by the API.
      */
-    protected function logUsage(string $provider, array $response): void
+    protected function recordUsage(string $provider, string $method, array $options, array $response): void
     {
-        if (!Config::get('larai.logging.enabled')) {
-            return;
-        }
-
         $usage = $response['usage'] ?? null;
 
         if (!$usage) {
+            return;
+        }
+
+        if (!Config::get('larai.logging.enabled')) {
+            $this->dispatchUsageEvent($provider, $method, $options, $usage, $response);
             return;
         }
 
@@ -267,6 +357,7 @@ class LarAI
         $logger = $channel ? Log::channel($channel) : Log::getFacadeRoot();
 
         if (!$logger) {
+            $this->dispatchUsageEvent($provider, $method, $options, $usage, $response);
             return;
         }
 
@@ -274,6 +365,162 @@ class LarAI
             'provider' => $provider,
             'usage' => $usage,
         ]);
+
+        $this->dispatchUsageEvent($provider, $method, $options, $usage, $response);
+    }
+
+    /**
+     * Dispatch a usage event for downstream tracking.
+     *
+     * @param array<string, mixed> $usage
+     * @param array<string, mixed> $response
+     */
+    protected function dispatchUsageEvent(
+        string $provider,
+        string $method,
+        array $options,
+        array $usage,
+        array $response
+    ): void {
+        if (!Config::get('larai.usage.events', true)) {
+            return;
+        }
+
+        $includeResponse = (bool) Config::get('larai.usage.include_response', false);
+        $includeOptions = (bool) Config::get('larai.usage.include_options', false);
+
+        event(new LarAIUsageReported(
+            provider: $provider,
+            method: $method,
+            usage: $usage,
+            options: $includeOptions ? $options : [],
+            response: $includeResponse ? $response : []
+        ));
+    }
+
+    /**
+     * Determine if caching should be used for this call.
+     */
+    protected function cacheEnabled(array $options): bool
+    {
+        return (bool) Arr::get($options, 'cache', Config::get('larai.cache.enabled', false));
+    }
+
+    /**
+     * Resolve the cache store configured for LarAI.
+     */
+    protected function cacheStore()
+    {
+        $store = Config::get('larai.cache.store');
+
+        return $store ? Cache::store($store) : Cache::store();
+    }
+
+    /**
+     * Determine cache TTL for the current request.
+     */
+    protected function cacheTtl(array $options): int
+    {
+        return (int) Arr::get($options, 'cache_ttl', Config::get('larai.cache.ttl', 300));
+    }
+
+    /**
+     * Build a deterministic cache key for a provider call.
+     */
+    protected function cacheKey(string $provider, string $method, array $args, array $options): string
+    {
+        $payload = [
+            'provider' => $provider,
+            'method' => $method,
+            'args' => $args,
+            'options' => $this->normalizeOptionsForCache($options),
+        ];
+
+        $prefix = (string) Config::get('larai.cache.prefix', 'larai:');
+
+        return $prefix . hash('sha256', json_encode($payload));
+    }
+
+    /**
+     * Normalize options to exclude non-deterministic keys.
+     *
+     * @return array<string, mixed>
+     */
+    protected function normalizeOptionsForCache(array $options): array
+    {
+        return Arr::except($options, ['async', 'cache', 'cache_ttl']);
+    }
+
+    /**
+     * Dispatch a pre-request hook for moderation and tracing.
+     */
+    protected function dispatchBeforeRequest(string $provider, string $method, array $args, array $options): void
+    {
+        if (!Config::get('larai.hooks.enabled', true)) {
+            return;
+        }
+
+        $result = Event::until(new LarAIBeforeRequest(
+            provider: $provider,
+            method: $method,
+            args: $args,
+            options: $options
+        ));
+
+        if ($result === false) {
+            throw new LarAIException('LarAI request blocked by a moderation hook.');
+        }
+    }
+
+    /**
+     * Dispatch a post-request hook for moderation and tracing.
+     */
+    protected function dispatchAfterRequest(
+        string $provider,
+        string $method,
+        array $args,
+        array $options,
+        array $response
+    ): void {
+        if (!Config::get('larai.hooks.enabled', true)) {
+            return;
+        }
+
+        Event::dispatch(new LarAIAfterRequest(
+            provider: $provider,
+            method: $method,
+            args: $args,
+            options: $options,
+            response: $response
+        ));
+    }
+
+    /**
+     * Read text content from a local file path.
+     */
+    protected function extractTextFromFile(string $path): string
+    {
+        if (!is_file($path)) {
+            throw new LarAIException("File [$path] not found.");
+        }
+
+        $content = file_get_contents($path);
+
+        if ($content === false) {
+            throw new LarAIException("Unable to read file [$path].");
+        }
+
+        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        if (in_array($extension, ['html', 'htm'], true)) {
+            $content = strip_tags($content);
+        }
+
+        if ($extension === 'pdf') {
+            throw new UnsupportedFeatureException('PDF parsing is not configured. Convert to text first.');
+        }
+
+        return trim($content);
     }
 
     /**

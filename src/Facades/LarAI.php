@@ -9,9 +9,13 @@ use Illuminate\Support\Facades\Facade;
  *
  * @method static array text(string $prompt, array $options = [])
  * @method static array chat(array $messages, array $options = [])
+ * @method static iterable streamText(string $prompt, array $options = [], ?callable $onChunk = null)
+ * @method static iterable streamChat(array $messages, array $options = [], ?callable $onChunk = null)
  * @method static array image(string $prompt, array $options = [])
  * @method static array summarize(string $text, array $options = [])
+ * @method static array summarizeFile(string $path, array $options = [])
  * @method static array embeddings(string|array $input, array $options = [])
+ * @method static array embeddingsFile(string $path, array $options = [])
  * @method static array recommend(string $query, array $candidates, array $options = [])
  * @method static string prompt(string $name, array $vars = [])
  * @method static void registerProvider(string $name, \AqwelAI\LarAI\Contracts\Provider $provider)
