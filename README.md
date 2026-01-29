@@ -1,5 +1,7 @@
 # LarAI
 
+![Laravel](https://laravel.com/img/logomark.min.svg)
+
 LarAI is a Laravel-first AI toolkit built by Aqwel AI. It offers a clean facade, modular providers, and a consistent API for text, chat, images, summarization, and embeddings.
 
 ## Features
