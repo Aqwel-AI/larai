@@ -14,6 +14,14 @@ return [
         'enabled' => env('LARAI_QUEUE', false),
         'connection' => env('LARAI_QUEUE_CONNECTION', null),
         'queue' => env('LARAI_QUEUE_NAME', null),
+        'rate_limits' => [
+            'enabled' => env('LARAI_QUEUE_RATE_LIMITS', false),
+            'providers' => [
+                'openai' => [
+                    'per_minute' => env('LARAI_QUEUE_OPENAI_PER_MINUTE', 0),
+                ],
+            ],
+        ],
     ],
 
     'retry' => [
@@ -42,6 +50,56 @@ return [
         'enabled' => env('LARAI_HOOKS', true),
     ],
 
+    'dto' => [
+        'enabled' => env('LARAI_DTO', false),
+    ],
+
+    'observability' => [
+        'enabled' => env('LARAI_OBSERVABILITY', true),
+    ],
+
+    'middlewares' => [
+        \AqwelAI\LarAI\Middleware\TraceIdMiddleware::class,
+        \AqwelAI\LarAI\Middleware\RedactMiddleware::class,
+    ],
+
+    'policies' => [
+        \AqwelAI\LarAI\Policies\RedactPiiPolicy::class,
+    ],
+
+    'policies_denylist' => [
+        // 'secret',
+    ],
+
+    'fallback' => [
+        'enabled' => env('LARAI_FALLBACK', true),
+        'providers' => [
+            'openai',
+        ],
+    ],
+
+    'routing' => [
+        'enabled' => env('LARAI_ROUTING', false),
+        'strategy' => env('LARAI_ROUTING_STRATEGY', 'cost'),
+        'providers' => [
+            'openai' => [
+                'cost' => 2,
+                'latency' => 2,
+            ],
+            'llama' => [
+                'cost' => 1,
+                'latency' => 3,
+            ],
+        ],
+    ],
+
+    'dashboard' => [
+        'enabled' => env('LARAI_DASHBOARD', false),
+        'path' => env('LARAI_DASHBOARD_PATH', 'larai'),
+        'middleware' => ['web'],
+        'store_usage' => env('LARAI_DASHBOARD_STORE_USAGE', false),
+    ],
+
     'prompts' => [
         'summarize' => "Summarize the following text:\n\n{text}",
         'chat_system' => 'You are a helpful assistant.',
@@ -52,6 +110,11 @@ return [
             'api_key' => env('OPENAI_API_KEY'),
             'base_url' => env('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
             'model' => env('OPENAI_MODEL', 'gpt-4o-mini'),
+            'vision_model' => env('OPENAI_VISION_MODEL', 'gpt-4o-mini'),
+            'transcribe_model' => env('OPENAI_TRANSCRIBE_MODEL', 'whisper-1'),
+            'speech_model' => env('OPENAI_SPEECH_MODEL', 'gpt-4o-mini-tts'),
+            'voice' => env('OPENAI_SPEECH_VOICE', 'alloy'),
+            'speech_format' => env('OPENAI_SPEECH_FORMAT', 'mp3'),
         ],
         'claude' => [
             'api_key' => env('ANTHROPIC_API_KEY'),

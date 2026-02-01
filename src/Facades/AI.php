@@ -13,8 +13,11 @@ use Illuminate\Support\Facades\Facade;
  * @method static iterable streamChat(array $messages, array $options = [], ?callable $onChunk = null)
  * @method static array image(string $prompt, array $options = [])
  * @method static array summarize(string $text, array $options = [])
+ * @method static array vision(string $prompt, string|array $images, array $options = [])
  * @method static array summarizeFile(string $path, array $options = [])
  * @method static array embeddings(string|array $input, array $options = [])
+ * @method static array transcribe(string $path, array $options = [])
+ * @method static array speak(string $text, array $options = [])
  * @method static array embeddingsFile(string $path, array $options = [])
  * @method static array recommend(string $query, array $candidates, array $options = [])
  * @method static string prompt(string $name, array $vars = [])
@@ -24,6 +27,9 @@ use Illuminate\Support\Facades\Facade;
  * @method static mixed queueImage(string $prompt, array $options = [])
  * @method static mixed queueSummarize(string $text, array $options = [])
  * @method static mixed queueEmbeddings(string|array $input, array $options = [])
+ * @method static mixed queueVision(string $prompt, string|array $images, array $options = [])
+ * @method static mixed queueTranscribe(string $path, array $options = [])
+ * @method static mixed queueSpeak(string $text, array $options = [])
  */
 class AI extends Facade
 {

@@ -40,6 +40,9 @@ class LarAIJob implements ShouldQueue
             'image',
             'summarize',
             'embeddings',
+            'vision',
+            'transcribe',
+            'speak',
         ];
 
         if (!in_array($this->action, $allowed, true)) {

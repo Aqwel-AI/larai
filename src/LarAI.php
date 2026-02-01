@@ -4,21 +4,30 @@ namespace AqwelAI\LarAI;
 
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
+use AqwelAI\LarAI\Contracts\AudioProvider;
 use AqwelAI\LarAI\Contracts\Provider;
 use AqwelAI\LarAI\Contracts\StreamingProvider;
+use AqwelAI\LarAI\Contracts\VisionProvider;
+use AqwelAI\LarAI\DTOs\ResponseFactory;
 use AqwelAI\LarAI\Events\LarAIAfterRequest;
 use AqwelAI\LarAI\Events\LarAIBeforeRequest;
+use AqwelAI\LarAI\Events\LarAIRequestTimed;
 use AqwelAI\LarAI\Events\LarAIUsageReported;
 use AqwelAI\LarAI\Exceptions\LarAIException;
 use AqwelAI\LarAI\Exceptions\UnsupportedFeatureException;
 use AqwelAI\LarAI\Jobs\LarAIJob;
+use AqwelAI\LarAI\Middleware\Middleware;
 use AqwelAI\LarAI\Providers\ClaudeProvider;
 use AqwelAI\LarAI\Providers\LlamaProvider;
 use AqwelAI\LarAI\Providers\OpenAIProvider;
+use AqwelAI\LarAI\Routing\HealthStore;
+use AqwelAI\LarAI\Routing\ProviderRouter;
+use AqwelAI\LarAI\Schema\SchemaValidator;
 
 /**
  * Core entry point for interacting with AI providers.
@@ -120,6 +129,16 @@ class LarAI
     }
 
     /**
+     * Run a vision prompt against one or more images.
+     *
+     * @param string|array<int, string> $images
+     */
+    public function vision(string $prompt, string|array $images, array $options = []): array
+    {
+        return $this->callProvider('vision', [$prompt, $images, $options], $options);
+    }
+
+    /**
      * Summarize the contents of a local file.
      */
     public function summarizeFile(string $path, array $options = []): array
@@ -135,6 +154,22 @@ class LarAI
     public function embeddings(string|array $input, array $options = []): array
     {
         return $this->callProvider('embeddings', [$input, $options], $options);
+    }
+
+    /**
+     * Transcribe an audio file from a local path.
+     */
+    public function transcribe(string $path, array $options = []): array
+    {
+        return $this->callProvider('transcribe', [$path, $options], $options);
+    }
+
+    /**
+     * Generate speech audio for the given text.
+     */
+    public function speak(string $text, array $options = []): array
+    {
+        return $this->callProvider('speak', [$text, $options], $options);
     }
 
     /**
@@ -246,11 +281,37 @@ class LarAI
     }
 
     /**
+     * Queue a vision request.
+     *
+     * @param string|array<int, string> $images
+     */
+    public function queueVision(string $prompt, string|array $images, array $options = []): mixed
+    {
+        return $this->queue('vision', [$prompt, $images, $options], $options);
+    }
+
+    /**
      * Queue an embeddings job.
      */
     public function queueEmbeddings(string|array $input, array $options = []): mixed
     {
         return $this->queue('embeddings', [$input, $options], $options);
+    }
+
+    /**
+     * Queue an audio transcription job.
+     */
+    public function queueTranscribe(string $path, array $options = []): mixed
+    {
+        return $this->queue('transcribe', [$path, $options], $options);
+    }
+
+    /**
+     * Queue a speech generation job.
+     */
+    public function queueSpeak(string $text, array $options = []): mixed
+    {
+        return $this->queue('speak', [$text, $options], $options);
     }
 
     /**
@@ -262,31 +323,86 @@ class LarAI
             return ['queued' => true, 'job' => $this->queue($method, $args, $options)];
         }
 
-        $provider = $this->provider(Arr::get($options, 'provider'));
         $cacheEnabled = $this->cacheEnabled($options);
+        $providers = $this->resolveProviders($options);
+        $lastException = null;
+        $supported = false;
 
-        if ($cacheEnabled) {
-            $cache = $this->cacheStore();
-            $cacheKey = $this->cacheKey($provider->name(), $method, $args, $options);
-            $cached = $cache->get($cacheKey);
+        foreach ($providers as $providerName) {
+            try {
+                $provider = $this->provider($providerName);
+                $providerType = $this->resolveProviderType($provider, $method);
 
-            if (is_array($cached)) {
-                return $cached;
+                if ($providerType === null) {
+                    continue;
+                }
+
+                $supported = true;
+                $cacheKey = null;
+                $context = [
+                    'trace_id' => $options['trace_id'] ?? null,
+                    'started_at' => microtime(true),
+                ];
+
+                [$args, $options, $context] = $this->applyMiddlewaresBefore(
+                    $provider->name(),
+                    $method,
+                    $args,
+                    $options,
+                    $context
+                );
+
+                if ($cacheEnabled) {
+                    $cache = $this->cacheStore();
+                    $cacheKey = $this->cacheKey($provider->name(), $method, $args, $options);
+                    $cached = $cache->get($cacheKey);
+
+                    if (is_array($cached)) {
+                        return $cached;
+                    }
+                }
+
+                $this->dispatchBeforeRequest($provider->name(), $method, $args, $options);
+                $response = $provider->{$method}(...$args);
+
+                if ($cacheEnabled && $cacheKey !== null) {
+                    $cacheTtl = $this->cacheTtl($options);
+                    $this->cacheStore()->put($cacheKey, $response, $cacheTtl);
+                }
+
+                [$response, $context] = $this->applyMiddlewaresAfter(
+                    $provider->name(),
+                    $method,
+                    $response,
+                    $context
+                );
+
+                $this->dispatchAfterRequest($provider->name(), $method, $args, $options, $response);
+                $this->recordUsage($provider->name(), $method, $options, $response);
+                $this->dispatchTiming($provider->name(), $method, $context);
+
+                $response = $this->validateStructuredOutput($method, $response, $options);
+
+                if ($this->dtoEnabled($options)) {
+                    return ResponseFactory::make($method, $response);
+                }
+
+                return $response;
+            } catch (\Throwable $exception) {
+                $this->healthStore()->markFailure($providerName);
+                $lastException = $exception;
             }
         }
 
-        $this->dispatchBeforeRequest($provider->name(), $method, $args, $options);
-        $response = $provider->{$method}(...$args);
-
-        if ($cacheEnabled) {
-            $cacheTtl = $this->cacheTtl($options);
-            $this->cacheStore()->put($cacheKey, $response, $cacheTtl);
+        if ($lastException) {
+            throw $lastException;
         }
 
-        $this->dispatchAfterRequest($provider->name(), $method, $args, $options, $response);
-        $this->recordUsage($provider->name(), $method, $options, $response);
+        if (!$supported && in_array($method, ['vision', 'transcribe', 'speak'], true)) {
+            throw new UnsupportedFeatureException('LarAI provider does not support this feature.');
+        }
 
-        return $response;
+        throw new LarAIException('LarAI provider resolution failed.');
     }
 
     /**
@@ -296,21 +412,31 @@ class LarAI
      */
     protected function streamProvider(string $method, array $args, array $options = [], ?callable $onChunk = null): iterable
     {
-        $provider = $this->provider(Arr::get($options, 'provider'));
+        $providers = $this->resolveProviders($options);
 
-        if (!$provider instanceof StreamingProvider) {
-            throw new UnsupportedFeatureException('LarAI streaming is not supported by this provider.');
-        }
+        foreach ($providers as $providerName) {
+            try {
+                $provider = $this->provider($providerName);
 
-        return (function () use ($provider, $method, $args, $onChunk) {
-            foreach ($provider->{$method}(...$args) as $chunk) {
-                if ($onChunk) {
-                    $onChunk($chunk);
+                if (!$provider instanceof StreamingProvider) {
+                    continue;
                 }
 
-                yield $chunk;
+        return (function () use ($provider, $method, $args, $onChunk) {
+                    foreach ($provider->{$method}(...$args) as $chunk) {
+                        if ($onChunk) {
+                            $onChunk($chunk);
+                        }
+
+                        yield $chunk;
+                    }
+                })();
+            } catch (\Throwable $exception) {
+                continue;
             }
-        })();
+        }
+
+        throw new UnsupportedFeatureException('LarAI streaming is not supported by the configured providers.');
     }
 
     /**
@@ -322,7 +448,13 @@ class LarAI
             throw new UnsupportedFeatureException('LarAI queue support is disabled.');
         }
 
-        $job = new LarAIJob($action, $args, Arr::get($options, 'provider'));
+        $provider = Arr::get($options, 'provider');
+
+        if ($provider) {
+            $this->enforceQueueRateLimit($provider);
+        }
+
+        $job = new LarAIJob($action, $args, $provider);
         $connection = Config::get('larai.queue.connection');
         $queue = Config::get('larai.queue.queue');
 
@@ -335,6 +467,39 @@ class LarAI
         }
 
         return Bus::dispatch($job);
+    }
+
+    /**
+     * Enforce per-provider queue budgets.
+     */
+    protected function enforceQueueRateLimit(string $provider): void
+    {
+        if (!Config::get('larai.queue.rate_limits.enabled', false)) {
+            return;
+        }
+
+        $limits = Config::get("larai.queue.rate_limits.providers.$provider", null);
+
+        if (!$limits || !is_array($limits)) {
+            return;
+        }
+
+        $maxPerMinute = (int) ($limits['per_minute'] ?? 0);
+
+        if ($maxPerMinute <= 0) {
+            return;
+        }
+
+        $key = 'larai:queue:rate:' . $provider . ':' . now()->format('YmdHi');
+        $count = Cache::increment($key);
+
+        if ($count === 1) {
+            Cache::put($key, $count, 60);
+        }
+
+        if ($count > $maxPerMinute) {
+            throw new LarAIException("Queue rate limit exceeded for provider [$provider].");
+        }
     }
 
     /**
@@ -448,7 +613,192 @@ class LarAI
      */
     protected function normalizeOptionsForCache(array $options): array
     {
-        return Arr::except($options, ['async', 'cache', 'cache_ttl']);
+        return Arr::except($options, [
+            'async',
+            'cache',
+            'cache_ttl',
+            'provider',
+            'fallback',
+            'routing',
+            'response_schema',
+            'dto',
+            'trace_id',
+        ]);
+    }
+
+    /**
+     * Resolve provider candidates for a request.
+     *
+     * @return array<int, string>
+     */
+    protected function resolveProviders(array $options): array
+    {
+        if (Config::get('larai.routing.enabled', false)) {
+            return $this->router()->resolve($options);
+        }
+
+        $override = Arr::get($options, 'provider');
+
+        if (is_array($override)) {
+            return array_values(array_unique(array_filter($override)));
+        }
+
+        $primary = $override ?: Config::get('larai.default', 'openai');
+        $fallbackEnabled = Arr::get($options, 'fallback', Config::get('larai.fallback.enabled', true));
+        $fallbacks = $fallbackEnabled ? (Config::get('larai.fallback.providers', []) ?: []) : [];
+
+        if (!is_array($fallbacks)) {
+            $fallbacks = [];
+        }
+
+        return array_values(array_unique(array_filter(array_merge([$primary], $fallbacks))));
+    }
+
+    /**
+     * Load configured request/response middlewares.
+     *
+     * @return array<int, Middleware>
+     */
+    protected function loadMiddlewares(): array
+    {
+        $middlewares = Config::get('larai.middlewares', []);
+        $instances = [];
+
+        foreach ($middlewares as $middleware) {
+            if (is_string($middleware) && class_exists($middleware)) {
+                $instances[] = App::make($middleware);
+            }
+        }
+
+        return $instances;
+    }
+
+    /**
+     * @param array<int, mixed> $args
+     * @param array<string, mixed> $options
+     * @param array<string, mixed> $context
+     * @return array{0: array<int, mixed>, 1: array<string, mixed>, 2: array<string, mixed>}
+     */
+    protected function applyMiddlewaresBefore(
+        string $provider,
+        string $method,
+        array $args,
+        array $options,
+        array $context
+    ): array {
+        foreach ($this->loadMiddlewares() as $middleware) {
+            $result = $middleware->before($provider, $method, $args, $options, $context);
+            $args = $result['args'];
+            $options = $result['options'];
+            $context = $result['context'];
+        }
+
+        return [$args, $options, $context];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @param array<string, mixed> $context
+     * @return array{0: array<string, mixed>, 1: array<string, mixed>}
+     */
+    protected function applyMiddlewaresAfter(
+        string $provider,
+        string $method,
+        array $response,
+        array $context
+    ): array {
+        foreach ($this->loadMiddlewares() as $middleware) {
+            $result = $middleware->after($provider, $method, $response, $context);
+            $response = $result['response'];
+            $context = $result['context'];
+        }
+
+        return [$response, $context];
+    }
+
+    /**
+     * Dispatch a timing event for observability.
+     *
+     * @param array<string, mixed> $context
+     */
+    protected function dispatchTiming(string $provider, string $method, array $context): void
+    {
+        if (!Config::get('larai.observability.enabled', true)) {
+            return;
+        }
+
+        $start = $context['started_at'] ?? null;
+        if (!is_float($start)) {
+            return;
+        }
+
+        $duration = (microtime(true) - $start) * 1000;
+
+        Event::dispatch(new LarAIRequestTimed(
+            provider: $provider,
+            method: $method,
+            durationMs: $duration,
+            context: $context
+        ));
+    }
+
+    /**
+     * Validate structured outputs with a JSON schema.
+     *
+     * @param array<string, mixed> $response
+     */
+    protected function validateStructuredOutput(string $method, array $response, array $options): array
+    {
+        $schema = $options['response_schema'] ?? null;
+
+        if (!$schema || !is_array($schema)) {
+            return $response;
+        }
+
+        $payload = $response['content'] ?? $response['raw'] ?? null;
+
+        if (is_string($payload)) {
+            $decoded = json_decode($payload, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                $payload = $decoded;
+            }
+        }
+
+        if ($payload !== null) {
+            App::make(SchemaValidator::class)->validate($schema, $payload);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Determine if DTO responses should be returned.
+     */
+    protected function dtoEnabled(array $options): bool
+    {
+        return (bool) Arr::get($options, 'dto', Config::get('larai.dto.enabled', false));
+    }
+
+    protected function router(): ProviderRouter
+    {
+        return App::make(ProviderRouter::class);
+    }
+
+    protected function healthStore(): HealthStore
+    {
+        return App::make(HealthStore::class);
+    }
+
+    /**
+     * Ensure the provider supports the requested method.
+     */
+    protected function resolveProviderType(Provider $provider, string $method): ?Provider
+    {
+        return match ($method) {
+            'vision' => $provider instanceof VisionProvider ? $provider : null,
+            'transcribe', 'speak' => $provider instanceof AudioProvider ? $provider : null,
+            default => $provider,
+        };
     }
 
     /**

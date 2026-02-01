@@ -2,15 +2,17 @@
 
 namespace AqwelAI\LarAI\Providers;
 
+use AqwelAI\LarAI\Contracts\AudioProvider;
 use AqwelAI\LarAI\Contracts\Provider;
 use AqwelAI\LarAI\Contracts\StreamingProvider;
+use AqwelAI\LarAI\Contracts\VisionProvider;
 use AqwelAI\LarAI\Exceptions\LarAIException;
 use Illuminate\Support\Facades\App;
 
 /**
  * OpenAI provider implementation.
  */
-class OpenAIProvider extends BaseProvider implements Provider, StreamingProvider
+class OpenAIProvider extends BaseProvider implements Provider, StreamingProvider, VisionProvider, AudioProvider
 {
     /**
      * Return provider identifier.
@@ -209,6 +211,130 @@ class OpenAIProvider extends BaseProvider implements Provider, StreamingProvider
             'embeddings' => $data['data'] ?? [],
             'raw' => $data,
             'usage' => $this->extractUsage($data),
+        ];
+    }
+
+    /**
+     * Run a vision prompt against one or more images.
+     *
+     * @param string|array<int, string> $images
+     */
+    public function vision(string $prompt, string|array $images, array $options = []): array
+    {
+        $imageList = is_array($images) ? $images : [$images];
+        $content = [
+            ['type' => 'text', 'text' => $prompt],
+        ];
+
+        foreach ($imageList as $image) {
+            $content[] = [
+                'type' => 'image_url',
+                'image_url' => ['url' => $image],
+            ];
+        }
+
+        $payload = [
+            'model' => $options['model'] ?? $this->config['vision_model'] ?? $this->config['model'] ?? null,
+            'messages' => [
+                [
+                    'role' => 'user',
+                    'content' => $content,
+                ],
+            ],
+            'temperature' => $options['temperature'] ?? 0.2,
+        ];
+
+        if (isset($options['max_tokens'])) {
+            $payload['max_tokens'] = (int) $options['max_tokens'];
+        }
+
+        $response = $this->request()
+            ->withToken($this->ensureApiKey())
+            ->post($this->baseUrl() . '/chat/completions', $payload);
+
+        if (!$response->successful()) {
+            throw new LarAIException('OpenAI vision request failed: ' . $response->body());
+        }
+
+        $data = $response->json();
+        $content = $data['choices'][0]['message']['content'] ?? '';
+
+        return [
+            'content' => $content,
+            'raw' => $data,
+            'usage' => $this->extractUsage($data),
+        ];
+    }
+
+    /**
+     * Transcribe an audio file using OpenAI.
+     */
+    public function transcribe(string $path, array $options = []): array
+    {
+        if (!is_file($path)) {
+            throw new LarAIException("Audio file [$path] not found.");
+        }
+
+        $payload = [
+            'model' => $options['model'] ?? $this->config['transcribe_model'] ?? 'whisper-1',
+        ];
+
+        if (isset($options['language'])) {
+            $payload['language'] = $options['language'];
+        }
+
+        $contents = file_get_contents($path);
+
+        if ($contents === false) {
+            throw new LarAIException("Unable to read audio file [$path].");
+        }
+
+        $response = $this->request()
+            ->withToken($this->ensureApiKey())
+            ->attach('file', $contents, basename($path))
+            ->post($this->baseUrl() . '/audio/transcriptions', $payload);
+
+        if (!$response->successful()) {
+            throw new LarAIException('OpenAI transcription request failed: ' . $response->body());
+        }
+
+        $data = $response->json();
+
+        return [
+            'text' => $data['text'] ?? '',
+            'raw' => $data,
+            'usage' => $this->extractUsage($data),
+        ];
+    }
+
+    /**
+     * Generate speech audio for the given text.
+     */
+    public function speak(string $text, array $options = []): array
+    {
+        $payload = [
+            'model' => $options['model'] ?? $this->config['speech_model'] ?? 'gpt-4o-mini-tts',
+            'input' => $text,
+            'voice' => $options['voice'] ?? $this->config['voice'] ?? 'alloy',
+        ];
+
+        $format = $options['format'] ?? $this->config['speech_format'] ?? 'mp3';
+        $payload['format'] = $format;
+
+        $response = $this->request()
+            ->withToken($this->ensureApiKey())
+            ->post($this->baseUrl() . '/audio/speech', $payload);
+
+        if (!$response->successful()) {
+            throw new LarAIException('OpenAI speech request failed: ' . $response->body());
+        }
+
+        $audio = base64_encode($response->body());
+
+        return [
+            'audio' => $audio,
+            'format' => $format,
+            'raw' => $response->body(),
         ];
     }
 }

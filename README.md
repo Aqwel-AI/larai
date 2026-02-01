@@ -19,6 +19,19 @@ LarAI is a Laravel-first AI toolkit built by Aqwel AI. It offers a clean facade,
 - RAG helpers (chunking + vector store adapters)
 - Moderation hooks via events
 - File input helpers for summarize/embeddings
+- Vision inputs (image + prompt)
+- Audio transcription and speech
+- Provider fallback routing
+- Typed DTO responses (optional)
+- Request/response middleware pipeline
+- Observability timing events
+- Rate-limit aware queue budgets
+- Prompt registry (DB + versioning)
+- Policy engine (PII redaction + guardrails)
+- Structured outputs with JSON schema validation
+- Test kit (mock providers)
+- CLI tools (artisan)
+- Dashboard module (usage/cost/errors)
 - Provider-agnostic design
 
 ## Requirements
@@ -59,6 +72,13 @@ Common config options (`config/larai.php`):
 - `larai.cache.*` response caching configuration
 - `larai.usage.*` usage event configuration
 - `larai.hooks.enabled` enable before/after request hooks
+- `larai.fallback.*` provider fallback configuration
+- `larai.dto.enabled` enable typed DTOs
+- `larai.middlewares` request/response middleware list
+- `larai.observability.enabled` timing events
+- `larai.queue.rate_limits.*` queue budgets
+- `larai.routing.*` routing rules
+- `larai.dashboard.*` dashboard configuration
 - `larai.providers.*` per-provider API keys and defaults
 
 ## Quick Start
@@ -176,6 +196,24 @@ LarAI::image('A minimalist poster of a city skyline', [
 LarAI::summarize($longText);
 ```
 
+### Vision
+
+```php
+LarAI::vision('Describe this image', 'https://example.com/photo.jpg');
+```
+
+### Transcribe Audio
+
+```php
+LarAI::transcribe(storage_path('audio/meeting.wav'));
+```
+
+### Speak (Text-to-Speech)
+
+```php
+$audio = LarAI::speak('Hello from LarAI');
+```
+
 ### File Summarization
 
 ```php
@@ -209,6 +247,8 @@ $prompt = LarAI::prompt('summarize', ['text' => $text]);
 All provider calls return a standardized array:
 
 - `content` for text/chat results
+- `text` for audio transcriptions
+- `audio` for speech generation (base64 encoded)
 - `tool_calls` for function/tool call outputs
 - `images` for image generations
 - `embeddings` for vector embeddings
@@ -216,11 +256,97 @@ All provider calls return a standardized array:
 - `usage` when the provider reports token usage
 - `raw` full provider payload
 
+## Typed DTO Responses
+
+Enable DTOs:
+
+```
+LARAI_DTO=true
+```
+
+When enabled, LarAI returns typed response objects (e.g. `TextResponse`, `ImageResponse`).
+
+## Middleware Pipeline
+
+Configure middleware in `config/larai.php` under `larai.middlewares`.
+
+## Observability
+
+LarAI emits `LarAIRequestTimed` with duration in ms when enabled.
+
+## Rate-Limit Aware Queue
+
+Configure queue budgets:
+
+```
+LARAI_QUEUE_RATE_LIMITS=true
+LARAI_QUEUE_OPENAI_PER_MINUTE=60
+```
+
+## Prompt Registry
+
+Use the registry service to create and render prompts:
+
+```php
+use AqwelAI\LarAI\Services\PromptRegistry;
+
+$registry = app(PromptRegistry::class);
+$registry->create('welcome', 'Hello {name}');
+$prompt = $registry->render('welcome', ['name' => 'Aksel']);
+```
+
+Run migrations to enable the prompt registry tables.
+
+## Policy Engine
+
+Policies run before requests. Configure `larai.policies` and `larai.policies_denylist`.
+
+## Structured Outputs
+
+Validate JSON outputs with a schema:
+
+```php
+LarAI::text('Return JSON', [
+    'response_schema' => [
+        'type' => 'object',
+        'required' => ['title'],
+        'properties' => [
+            'title' => ['type' => 'string'],
+        ],
+    ],
+]);
+```
+
+## Test Kit
+
+```php
+use AqwelAI\LarAI\Testing\MockProvider;
+
+LarAI::registerProvider('mock', new MockProvider());
+```
+
+## CLI
+
+```bash
+php artisan larai:run text "Hello"
+```
+
+## Dashboard
+
+Enable:
+
+```
+LARAI_DASHBOARD=true
+LARAI_DASHBOARD_STORE_USAGE=true
+```
+
+Run migrations to enable the dashboard tables.
 ## Common Options
 
 You can pass options to any call:
 
 - `provider` override default provider
+- `fallback` enable/disable fallback routing
 - `model` select a model
 - `temperature` control creativity (chat/text)
 - `max_tokens` cap output length
@@ -235,6 +361,14 @@ LarAI::text('Hello', [
     'provider' => 'claude',
     'model' => 'claude-3-5-sonnet-20240620',
     'max_tokens' => 200,
+]);
+```
+
+Provider fallback example:
+
+```php
+LarAI::text('Hello', [
+    'provider' => ['openai', 'llama'],
 ]);
 ```
 
